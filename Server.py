@@ -6,10 +6,7 @@ import re
 import time
 
 # Function to get the IP address of the machine
-def get_ip_address():
-    hostname = socket.gethostname()
-    ip_address = socket.gethostbyname(hostname)
-    return ip_address
+
 
 def handle_client(connection, address, data):
     print(f"Connected to {address}")
@@ -131,7 +128,7 @@ def backup_chunks(data):
 # Main function
 def main():
     data = read_json('metadata.json')
-    server_ip = get_ip_address()
+    server_ip = 192.168.18.35, 192.168.18.144, 192.168.18.34 , 192.168.18.228
     server_thread = threading.Thread(target=start_server, args=(server_ip, 12345, data))
     backup_thread = threading.Thread(target=backup_chunks, args=(data,))
 
