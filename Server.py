@@ -1,22 +1,47 @@
+import json
+import os
 import socket
 import threading
-import datetime
-import os
-import json
 import re
+import time
 
-Config = {
-    "Devices": "devices.json",
-    "AbortedTransfer": "aborted_transfer.json",
-    "TransferLog": "transfer_log.json",
-    "MetaData": "metadata.json"
-}
+def handle_client(connection, address, data):
+    print(f"Connected to {address}")
+    try:
+        while True:
+            data_received = connection.recv(1024)
+            if not data_received:
+                break
+            print(f"Received from {address}: {data_received.decode()}")
+            if data_received == b"GET_METADATA":
+                metadata = file_metadata("/Files")  # Change this to your directory path
+                connection.sendall(json.dumps(metadata).encode())
+            else:
+                connection.sendall(data_received)
+    except Exception as e:
+        print(f"Error with {address}: {e}")
+    finally:
+        print(f"Disconnected from {address}")
 
-def _files_exist():
-    for file in [Config["Devices"], Config["AbortedTransfer"], Config["TransferLog"], Config["MetaData"]]:
-        if not os.path.isfile(file):
-            with open(file, 'w') as f:
-                json.dump({}, f)
+# Function to read JSON data from a file
+def read_json(file_path):
+    with open(file_path, 'r') as file:
+        data = json.load(file)
+    return data
+
+def start_server(ip, port, data):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((ip, port))
+    server_socket.listen(5)
+    print(f"Server started on {ip}:{port}")
+
+    try:
+        while True:
+            client_socket, address = server_socket.accept()
+            client_thread = threading.Thread(target=handle_client, args=(client_socket, address, data))
+            client_thread.start()
+    except KeyboardInterrupt:
+        print("Server terminated.")
 
 def file_metadata(directory):
     metadata = {}
@@ -39,78 +64,75 @@ def file_metadata(directory):
                 }
     return metadata
 
-def send_file_metadata(client_socket, directory):
-    metadata = file_metadata(directory)
-    metadata_json = json.dumps(metadata)
-    client_socket.send(metadata_json.encode())
+def get_online_devices(data):
+    online_devices = []
+    for ip, status_info in data.items():
+        if status_info['Status'] == 1:
+            online_devices.append(ip)
+    return online_devices
 
-def send_file_chunk(client_socket, filename, chunk_number):
-    chunk_filename = f"{filename}_chunk{chunk_number}_of_{chunk_number}"
-    if os.path.isfile(chunk_filename):
-        with open(chunk_filename, 'rb') as f:
-            chunk_data = f.read()
-        client_socket.sendall(chunk_data)
-    else:
-        client_socket.sendall(b'')
+def get_local_files(directory):
+    local_files = {}
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            local_files[filename] = set()
+            with open(os.path.join(root, filename), 'r') as file:
+                lines = file.readlines()
+                for line in lines:
+                    chunk_index = int(line.strip())  # Assuming each line contains a chunk index
+                    local_files[filename].add(chunk_index)
+    return local_files
 
-def handle_echo(data, client_socket):
-    heartbeat_status(client_socket)
-    heartbeat = heartbeat_check(client_socket)
-    if heartbeat == 200:
-        return f"Echo: {data}"
-    else:
-        return "Heartbeat check failed"
+# Function to send chunks to a client
+def send_chunks(connection, filename, chunks):
+    try:
+        with open(os.path.join("/Files", filename), 'rb') as file:  # Change this to your directory path
+            for chunk_index in chunks:
+                # Assuming each chunk is read as 1024 bytes
+                file.seek(chunk_index * 1024)
+                chunk_data = file.read(1024)
+                connection.sendall(chunk_data)
+        print(f"Sent chunks of {filename} to {connection.getpeername()[0]}")
+    except Exception as e:
+        print(f"Error sending chunks to {connection.getpeername()[0]}: {e}")
+    finally:
+        connection.close()
 
-def handle_time(client_socket):
-    _files_exist()
-    send_file_metadata(client_socket, ".")
-    return f"Server time: {datetime.datetime.now()}"
+def backup_chunks(data):
+    while True:
+        time.sleep(37)
+        online_devices = get_online_devices(data)
+        local_files = get_local_files("/Files")  # Change this to your directory path
+        for filename, chunks in local_files.items():
+            for ip in online_devices:
+                if filename in data[ip]:
+                    remote_chunks = set(data[ip][filename]["chunks"])
+                    missing_chunks = chunks - remote_chunks
+                    if len(missing_chunks) > 0:
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(5)
+                            sock.connect((ip, 12345))  # Assume server listens on port 12345
+                            request_data = json.dumps({"filename": filename, "chunks": list(missing_chunks)})
+                            sock.sendall(request_data.encode())
+                            response = sock.recv(1024)
+                            if response == b"RECEIVED":
+                                print(f"Sent missing chunks of {filename} to {ip}")
+                            sock.close()
+                        except Exception as e:
+                            print(f"Error sending chunks to {ip}: {e}")
 
-def handle_reverse(data):
-    return f"Reversed: {data[::-1]}"
+# Main function
+def main():
+    data = read_json('metadata.json')
+    server_thread = threading.Thread(target=start_server, args=('192.168.18.51', 12345, data))
+    backup_thread = threading.Thread(target=backup_chunks, args=(data,))
 
-def heartbeat_check(client_socket):
-    heartbeat = int(client_socket.recv(1024).decode())
-    return heartbeat
+    server_thread.start()
+    backup_thread.start()
 
-def heartbeat_status(client_socket):
-    heartbeat_signal = str(200)
-    client_socket.send(heartbeat_signal.encode())
-
-def client_handler(conn, addr):
-    print(f"Connected by {addr}")
-    with conn:
-        while True:
-            data = conn.recv(1024).decode()
-            if not data:
-                break
-
-            command, *params = data.split()
-            if command == "ECHO":
-                response = handle_echo(" ".join(params), conn)
-            elif command == "TIME":
-                response = handle_time(conn)
-            elif command == "REVERSE":
-                response = handle_reverse(" ".join(params))
-            elif command == "REQUEST_CHUNK":
-                filename, chunk_number = params
-                send_file_chunk(conn, filename, int(chunk_number))
-                continue  # No need to send a standard response for this command
-            else:
-                response = "Unknown command"
-
-            if command != "TIME" and command != "REQUEST_CHUNK":  # Send the response only for non-TIME and non-REQUEST_CHUNK commands
-                conn.sendall(response.encode())
-
-def start_server(host='192.168.18.51', port=65432):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, port))
-        s.listen()
-        print(f"Server listening on {host}:{port}")
-        while True:
-            conn, addr = s.accept()
-            thread = threading.Thread(target=client_handler, args=(conn, addr))
-            thread.start()
+    server_thread.join()
+    backup_thread.join()
 
 if __name__ == "__main__":
-    start_server()
+    main()

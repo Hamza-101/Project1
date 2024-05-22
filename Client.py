@@ -1,79 +1,137 @@
-import socket
-import time
 import json
 import os
+import socket
+import threading
+import time
 
-def heartbeat_check(client_socket):
-    client_socket.send(str(200).encode())
+# Ensure the 'metadata.json' file exists
+if not os.path.exists("metadata.json"):
+    with open("metadata.json", "w") as file:
+        json.dump({}, file)
 
-def heartbeat_status(client_socket):
-    return int(client_socket.recv(1024).decode())
-
-def connect_to_server(ip, port=65432):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.connect((ip, port))
-            print(f"Connected to {ip}:{port}")
-            while True:
-                command = input("Enter command (ECHO, TIME, REVERSE) or 'exit' to quit: ")
-                if command.lower() == 'exit':
-                    break
-                s.sendall(command.encode())
-                if command.startswith("TIME"):
-                    metadata_json = s.recv(4096).decode()
-                    file_metadata = json.loads(metadata_json)
-                    print(f"Received file metadata: {file_metadata}")
-                    check_and_request_missing_chunks(s, file_metadata)
-                else:
-                    if command.startswith("ECHO"):
-                        heartbeat_check(s)
-                        if heartbeat_status(s) == 200:
-                            data = s.recv(1024).decode()
-                            print(f"Received from server: {data}")
-                        else:
-                            print("Heartbeat check failed")
-                    else:
-                        data = s.recv(1024).decode()
-                        print(f"Received from server: {data}")
-        except socket.error as e:
-            print(f"Failed to connect to {ip}:{port}, error: {e}")
-            return False
-    return True
-
-def read_ips_from_file(file_path):
+# Function to read JSON data from a file
+def read_json(file_path):
     with open(file_path, 'r') as file:
-        ips = file.read().splitlines()
-    return ips
+        data = json.load(file)
+    return data
 
-def try_connecting_to_ips(file_path):
-    ips = read_ips_from_file(file_path)
-    for ip in ips:
-        if connect_to_server(ip):
-            return
-    print("All connection attempts failed. Retrying in 15 seconds.")
-    time.sleep(15)
-    try_connecting_to_ips(file_path)
+# Function to update client status in the JSON data
+def update_status(data, ip, status):
+    data[ip]['Status'] = status
 
-def check_and_request_missing_chunks(client_socket, file_metadata):
-    for filename, metadata in file_metadata.items():
-        local_chunks = set()
-        for i in range(1, metadata['total_chunks'] + 1):
-            chunk_filename = f"{filename}_chunk{i}_of_{metadata['total_chunks']}"
-            if os.path.isfile(chunk_filename):
-                local_chunks.add(i)
-        
-        missing_chunks = set(range(1, metadata['total_chunks'] + 1)) - local_chunks
-        if missing_chunks:
-            print(f"Missing chunks for {filename}: {missing_chunks}")
-            for chunk in missing_chunks:
-                client_socket.sendall(f"REQUEST_CHUNK {filename} {chunk}".encode())
-                chunk_data = client_socket.recv(4096)
-                if chunk_data:
-                    chunk_filename = f"{filename}_chunk{chunk}_of_{metadata['total_chunks']}"
-                    with open(chunk_filename, 'wb') as f:
-                        f.write(chunk_data)
-                    print(f"Saved missing chunk {chunk} for {filename}")
+# Function to retrieve and store file metadata
+def retrieve_and_store_metadata(ip, data):
+    metadata = request_file_metadata(ip)
+    if metadata:
+        data[ip]['Metadata'] = metadata
+        print(f"Metadata updated for {ip}")
+
+# Function to attempt connection to a device
+def attempt_connection(ip, data):
+    while True:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)  # Set a timeout for the connection attempt
+            sock.connect((ip, 12345))  # Assume port 12345 for connection
+            update_status(data, ip, 1)  # Update status to connected (1)
+            print(f"Successfully connected to {ip}")
+            retrieve_and_store_metadata(ip, data)  # Retrieve and store metadata
+            # We can add additional functionality here if needed
+        except Exception as e:
+            print(f"Failed to connect to {ip}: {e}")
+            update_status(data, ip, 0)  # Update status to disconnected (0)
+        time.sleep(15)  # Wait for 15 seconds before trying again
+
+# Function to request file chunks from the server
+def request_file_chunks(ip, filename):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((ip, 12345))  # Assume server listens on port 12345
+        request_data = json.dumps({"command": "GET_FILE_CHUNKS", "filename": filename})
+        sock.sendall(request_data.encode())
+        response = sock.recv(1024)
+        chunks = json.loads(response.decode())
+        return chunks
+    except Exception as e:
+        print(f"Error requesting file chunks from {ip}: {e}")
+        return []
+
+# Function to start connection attempts to devices
+def start_connection_attempts(data):
+    for ip, status_info in data.items():
+        if status_info['Status'] == 1:
+            thread = threading.Thread(target=attempt_connection, args=(ip, data))
+            thread.start()
+
+# Function to request file metadata from the server
+def request_file_metadata(ip):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((ip, 12345))  # Assume server listens on port 12345
+        sock.sendall(b"GET_METADATA")
+        response = sock.recv(1024)
+        metadata = json.loads(response.decode())
+        return metadata
+    except Exception as e:
+        print(f"Error requesting file metadata from {ip}: {e}")
+        return {}
+
+def handle_user_input(data):
+    while True:
+        filename = input("Enter filename: ")
+        online_devices = get_online_devices(data)
+        found = False
+        if not online_devices:
+            print("No devices online")
+        else:    
+            for ip in online_devices:
+                metadata = data[ip].get('Metadata', None)
+                if metadata and filename in metadata:
+                    found = True
+                    print(f"Fetching file '{filename}' from {ip}...")
+                    chunks = request_file_chunks(ip, filename)
+                    for chunk in chunks:
+                        print(f"Received chunk {chunk} for {filename}")
+                        # Code to process the received chunk
+                    break
+            if not found:
+                print(f"File '{filename}' not found in directory.")
+
+# Function to save JSON data to a file
+def save_json(file_path, data):
+    with open(file_path, 'w') as file:
+        json.dump(data, file, indent=4)
+
+def get_online_devices(data):
+    online_devices = []
+    for ip, status_info in data.items():
+        if status_info['Status'] == 1:
+            online_devices.append(ip)
+    return online_devices
+
+# Function to periodically update metadata
+def update_metadata_periodically(data):
+    while True:
+        for ip in get_online_devices(data):
+            retrieve_and_store_metadata(ip, data)
+        time.sleep(30)  # Wait for 30 seconds before the next update
+
+# Main function
+def main(file_path):
+    data = read_json(file_path)
+    
+    connection_thread = threading.Thread(target=start_connection_attempts, args=(data,))
+    metadata_thread = threading.Thread(target=update_metadata_periodically, args=(data,))
+    
+    connection_thread.start()
+    metadata_thread.start()
+
+    handle_user_input(data)
+
+    connection_thread.join()
+    metadata_thread.join()
 
 if __name__ == "__main__":
-    ip_file_path = 'devices.txt'  # The file containing IP addresses to try
-    try_connecting_to_ips(ip_file_path)
+    main('devices.json')
