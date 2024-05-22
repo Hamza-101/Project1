@@ -134,4 +134,4 @@ def main(file_path):
     metadata_thread.join()
 
 if __name__ == "__main__":
-    main('devices.json')
+    main('metadata.json')
