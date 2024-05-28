@@ -140,3 +140,59 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+import json
+import os
+import socket
+import threading
+
+# Ensure the 'metadata.json' file exists
+if not os.path.exists("metadata.json"):
+    with open("metadata.json", "w") as file:
+        json.dump({}, file)
+
+# Function to read JSON data from a file
+def read_json(file_path):
+    with open(file_path, 'r') as file:
+        data = json.load(file)
+    return data
+
+def handle_client(connection, address):
+    print(f"Connected to {address}")
+    try:
+        while True:
+            data_received = connection.recv(1024)
+            if not data_received:
+                break
+            print(f"Received from {address}: {data_received.decode()}")
+    except Exception as e:
+        print(f"Error with {address}: {e}")
+    finally:
+        connection.close()
+        print(f"Disconnected from {address}")
+
+def start_server(ip, port):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((ip, port))
+    server_socket.listen(5)
+    print(f"Server started on {ip}:{port}")
+
+    try:
+        while True:
+            client_socket, address = server_socket.accept()
+            client_thread = threading.Thread(target=handle_client, args=(client_socket, address))
+            client_thread.start()
+    except KeyboardInterrupt:
+        print("Server terminated.")
+
+def get_server_ip():
+    return socket.gethostbyname(socket.gethostname())
+
+def main():
+    server_ip = get_server_ip()
+    start_server(server_ip, 12345)
+
+if __name__ == "__main__":
+    main()
+
